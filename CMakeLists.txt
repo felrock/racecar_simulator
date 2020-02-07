@@ -9,7 +9,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 set(CMAKE_CXX_FLAGS "-Wall -Wextra")
-set(CMAKE_CXX_FLAGS_DEBUG "-g") 
+set(CMAKE_CXX_FLAGS_DEBUG "-g")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3")
 find_package(OpenCV)
 find_package(Eigen3)
@@ -62,16 +62,15 @@ if(DEFINED CATKIN_DEVEL_PREFIX)
 
   add_message_files(
     FILES
-    )
+    carstate.msg
+  )
+
   generate_messages(
     DEPENDENCIES
     std_msgs
     nav_msgs
     sensor_msgs
     )
-
-
-
 
   # Include catkin_libraries
   catkin_package(
@@ -81,9 +80,6 @@ if(DEFINED CATKIN_DEVEL_PREFIX)
   )
   set(LIBS ${LIBS} ${catkin_LIBRARIES})
   include_directories(include ${catkin_INCLUDE_DIRS})
-
-
-  
 
   # Add the nodes
   file(GLOB NODE_SRC_FILES node/*.cpp)
