@@ -11,25 +11,21 @@
 #include <nav_msgs/Odometry.h>
 #include <sensor_msgs/Imu.h>
 #include <std_msgs/Int32MultiArray.h>
-#include <std_msgs/String.h>
 
 #include <sensor_msgs/LaserScan.h>
 #include <geometry_msgs/PoseWithCovarianceStamped.h>
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/PointStamped.h>
 
-// Custom message to keep track of states
-#include <racecar_simulator/carstate.h>
+#include "f110_simulator/pose_2d.hpp"
+#include "f110_simulator/ackermann_kinematics.hpp"
+#include "f110_simulator/scan_simulator_2d.hpp"
 
-#include "racecar_simulator/pose_2d.hpp"
-#include "racecar_simulator/ackermann_kinematics.hpp"
-#include "racecar_simulator/scan_simulator_2d.hpp"
-
-#include "racecar_simulator/car_state.hpp"
-#include "racecar_simulator/car_params.hpp"
-#include "racecar_simulator/ks_kinematics.hpp"
-#include "racecar_simulator/st_kinematics.hpp"
-#include "racecar_simulator/precompute.hpp"
+#include "f110_simulator/car_state.hpp"
+#include "f110_simulator/car_params.hpp"
+#include "f110_simulator/ks_kinematics.hpp"
+#include "f110_simulator/st_kinematics.hpp"
+#include "f110_simulator/precompute.hpp"
 
 #include <iostream>
 #include <math.h>
@@ -37,10 +33,24 @@
 
 using namespace racecar_simulator;
 
+class ActionTree {
+
+    public:
+    double speed, angle;
+    double score;
+
+    ActionTree parent;
+    std::vector<ActionTree> children;
+    ActionTree(double speed, double angle, std::vector<ActionTree> children)
+    {
+        this.speed = speed;
+        this.angle = angle;
+        this.children = children;
+    }
+};
+
 class RacecarSimulator {
-
     private:
-
     // A ROS node
     ros::NodeHandle n;
 
@@ -49,7 +59,6 @@ class RacecarSimulator {
 
     // obstacle states (1D index) and parameters
     std::vector<int> added_obs;
-
     // listen for clicked point for adding obstacles
     ros::Subscriber obs_sub;
     int obstacle_size;
@@ -89,12 +98,6 @@ class RacecarSimulator {
     ros::Subscriber pose_sub;
     ros::Subscriber pose_rviz_sub;
 
-    // Sim state subscriber, for settings a state
-    ros::Subscriber set_state_sub;
-
-    // Subsribe to update pose
-    ros::Subscriber update_sub;
-
     // Publish a scan, odometry, and imu data
     bool broadcast_transform;
     bool pub_gt_pose;
@@ -102,9 +105,6 @@ class RacecarSimulator {
     ros::Publisher pose_pub;
     ros::Publisher odom_pub;
     ros::Publisher imu_pub;
-
-    // Sim state publisher
-    ros::Publisher state_pub;
 
     // publisher for map with obstacles
     ros::Publisher map_pub;
@@ -142,8 +142,11 @@ class RacecarSimulator {
     int buffer_length;
     std::vector<double> steering_buffer;
 
+    // moved rate here
+    double update_pose_rate;
 
-    public:
+
+public:
 
     RacecarSimulator(): im_server("racecar_sim") {
         // Initialize the node handle
@@ -179,7 +182,7 @@ class RacecarSimulator {
 
         // Fetch the car parameters
         int scan_beams;
-        double update_pose_rate, scan_std_dev;
+        double scan_std_dev;
         n.getParam("wheelbase", params.wheelbase);
         n.getParam("update_pose_rate", update_pose_rate);
         n.getParam("scan_beams", scan_beams);
@@ -225,7 +228,7 @@ class RacecarSimulator {
         odom_pub = n.advertise<nav_msgs::Odometry>(odom_topic, 1);
 
         // Make a publisher for IMU messages
-        //imu_pub = n.advertise<sensor_msgs::Imu>(imu_topic, 1);
+        imu_pub = n.advertise<sensor_msgs::Imu>(imu_topic, 1);
 
         // Make a publisher for publishing map with obstacles
         map_pub = n.advertise<nav_msgs::OccupancyGrid>("/map", 1);
@@ -233,14 +236,8 @@ class RacecarSimulator {
         // Make a publisher for ground truth pose
         pose_pub = n.advertise<geometry_msgs::PoseStamped>(gt_pose_topic, 1);
 
-        // Publisher for our state
-        state_pub = n.advertise<racecar_simulator::carstate>("/read_state", 1);
-
         // Start a timer to output the pose
-        // Update at request instead
-        //
-        //update_pose_timer = n.createTimer(ros::Duration(update_pose_rate), &RacecarSimulator::update_pose, this);
-        update_sub = n.subscribe("/update", 1, &RacecarSimulator::update_pose, this);
+        update_pose_timer = n.createTimer(ros::Duration(update_pose_rate), &RacecarSimulator::update_pose, this);
 
         // Start a subscriber to listen to drive commands
         drive_sub = n.subscribe(drive_topic, 1, &RacecarSimulator::drive_callback, this);
@@ -255,8 +252,6 @@ class RacecarSimulator {
         // obstacle subscriber
         obs_sub = n.subscribe("/clicked_point", 1, &RacecarSimulator::obs_callback, this);
 
-        set_state_sub = n.subscribe("/write_state", 1, &RacecarSimulator::set_state_callback, this);
-
         // get collision safety margin
         n.getParam("coll_threshold", thresh);
         n.getParam("ttc_threshold", ttc_threshold);
@@ -264,7 +259,9 @@ class RacecarSimulator {
         scan_ang_incr = scan_simulator.get_angle_increment();
 
         cosines = Precompute::get_cosines(scan_beams, -scan_fov/2.0, scan_ang_incr);
-        car_distances = Precompute::get_car_distances(scan_beams, params.wheelbase, width, scan_distance_to_base_link, -scan_fov/2.0, scan_ang_incr);
+        car_distances = Precompute::get_car_distances(scan_beams, params.wheelbase, width,
+                scan_distance_to_base_link, -scan_fov/2.0, scan_ang_incr);
+
 
         // steering delay buffer
         steering_buffer = std::vector<double>(buffer_length);
@@ -302,7 +299,6 @@ class RacecarSimulator {
         visualization_msgs::InteractiveMarkerControl clear_obs_control;
         clear_obs_control.interaction_mode = visualization_msgs::InteractiveMarkerControl::BUTTON;
         clear_obs_control.name = "clear_obstacles_control";
-
         // make a box for the button
         visualization_msgs::Marker clear_obs_marker;
         clear_obs_marker.type = visualization_msgs::Marker::CUBE;
@@ -324,9 +320,73 @@ class RacecarSimulator {
         im_server.applyChanges();
 
         ROS_INFO("Simulator constructed.");
+    } /* End of constructor */
+
+    void tree_ex(const ros::TimerEvent&)
+    {
+        // this function might be called by particle filter positioning thingy?
+
+        // add child actions
+        ActionTree leftAction = new ActionTree(state.speed,
+                                               state.angle-ang_inc,
+                                               std::vector<ActionTree>());
+
+        ActionTree noAction = new ActionTree(state.speed,
+                                               state.angle,
+                                               std::vector<ActionTree>());
+
+        ActionTree rightAction = new ActionTree(state.speed,
+                                                state.angle+ang_inc,
+                                                std::vector<ActionTree>());
+
+        std::vector<ActionTree> children = new std::vector<ActionTree>();
+        children.push_back(rightAction);
+        children.push_back(noAction);
+        children.push_back(leftAction);
+
+        ActionTree root = new ActionTree(state.speed, state.angle, &children);
+
+        std::vector<ActionTree> queue = new std::vector<ActionTree>();
+        queue.push_back(root);
+
+        while(queue.size() > 0 && t_start + exec_time < t_end)
+        {
+            ActionTree current_action = queue.pop();
+            // run it through one iteration
+            // check if terminal state
+            // propagate score up the tree
+        }
+
+
+
+        // choose the best option
+        double leftActionScore = root.children[0].score;
+        double noActionScore = root.children[1].score;
+        double rightActionScore = root.children[2].score;
+
+        if(leftActionScore > rightActionScore)
+        {
+            if(leftActionScore > noActionScore)
+            {
+                // left
+            }
+            else
+            {
+                // no action
+            }
+        }
+        else if(rightActionScore > noActionScore)
+        {
+            // right
+        }
+        else
+        {
+            // no action
+        }
     }
-    // void update_pose(const ros::TimerEvent&) {
-    void update_pose(const std_msgs::String&){
+
+
+    void update_pose(const ros::TimerEvent&) {
 
         // simulate P controller
         compute_accel(desired_speed);
@@ -349,26 +409,25 @@ class RacecarSimulator {
             accel,
             steer_angle_vel,
             params,
-            current_seconds - previous_seconds);
+            update_pose_rate);
+
+        // limit values to max and min set in params
         state.velocity = std::min(std::max(state.velocity, -max_speed), max_speed);
         state.steer_angle = std::min(std::max(state.steer_angle, -max_steering_angle), max_steering_angle);
 
         previous_seconds = current_seconds;
 
-        /// Publish the pose as a transformation
+        // Publish the pose as a transformation
         pub_pose_transform(timestamp);
 
-        /// Publish the steering angle as a transformation so the wheels move
+        // Publish the steering angle as a transformation so the wheels move
         pub_steer_ang_transform(timestamp);
 
         // Make an odom message as well and publish it
         pub_odom(timestamp);
 
         // TODO: make and publish IMU message
-        //pub_imu(timestamp);
-
-        // publish sim state
-        pub_state(timestamp);
+        pub_imu(timestamp);
 
         /// KEEP in sim
         // If we have a map, perform a scan
@@ -429,6 +488,7 @@ class RacecarSimulator {
 
             scan_pub.publish(scan_msg);
 
+
             // Publish a transformation between base link and laser
             pub_laser_link_transform(timestamp);
 
@@ -437,7 +497,7 @@ class RacecarSimulator {
     } // end of update_pose
 
 
-    /// ---------------------- GENERAL HELPER FUNCTIONS ----------------------
+/// ---------------------- GENERAL HELPER FUNCTIONS ----------------------
 
     std::vector<int> ind_2_rc(int ind) {
         std::vector<int> rc;
@@ -549,45 +609,6 @@ class RacecarSimulator {
     }
 
     /// ---------------------- CALLBACK FUNCTIONS ----------------------
-    void set_state_callback(const racecar_simulator::carstate &msg)
-    {
-        // carstate
-        state.x                = msg.x;
-        state.y                = msg.y;
-        state.theta            = msg.theta;
-        state.velocity         = msg.velocity;
-        state.steer_angle      = msg.steer_angle;
-        state.angular_velocity = msg.angular_velocity;
-        state.slip_angle       = msg.slip_angle;
-        state.st_dyn           = msg.st_dyn;
-
-        // sim variables, add .msg
-        previous_seconds           = msg.previous_seconds;
-        scan_distance_to_base_link = msg.scan_distance_to_base_link;
-        max_speed                  = msg.max_speed;
-        max_steering_angle         = msg.max_steering_angle;
-        max_accel                  = msg.max_accel;
-        max_steering_vel           = msg.max_steering_vel;
-        max_decel                  = msg.max_decel;
-        desired_speed              = msg.desired_speed;
-        desired_steer_ang          = msg.desired_steer_ang;
-        accel                      = msg.accel;
-        steer_angle_vel            = msg.steer_angle_vel;
-        width                      = msg.width;
-
-        // carparam
-        params.wheelbase      = msg.wheelbase;
-        params.friction_coeff = msg.friction_coeff;
-        params.h_cg           = msg.h_cg;
-        params.l_f            = msg.l_f;
-        params.l_r            = msg.l_r;
-        params.cs_f           = msg.cs_f;
-        params.cs_r           = msg.cs_r;
-        params.mass           = msg.mass;
-        params.I_z            = msg.I_z;
-
-        // set state
-    }
 
     void obs_callback(const geometry_msgs::PointStamped &msg) {
         double x = msg.point.x;
@@ -667,151 +688,105 @@ class RacecarSimulator {
         map_exists = true;
     }
 
-    /// ---------------------- PUBLISHING HELPER FUNCTIONS ----------------------
+        /// ---------------------- PUBLISHING HELPER FUNCTIONS ----------------------
 
-    void pub_pose_transform(ros::Time timestamp) {
-        // Convert the pose into a transformation
-        geometry_msgs::Transform t;
-        t.translation.x = state.x;
-        t.translation.y = state.y;
-        tf2::Quaternion quat;
-        quat.setEuler(0., 0., state.theta);
-        t.rotation.x = quat.x();
-        t.rotation.y = quat.y();
-        t.rotation.z = quat.z();
-        t.rotation.w = quat.w();
+        void pub_pose_transform(ros::Time timestamp) {
+            // Convert the pose into a transformation
+            geometry_msgs::Transform t;
+            t.translation.x = state.x;
+            t.translation.y = state.y;
+            tf2::Quaternion quat;
+            quat.setEuler(0., 0., state.theta);
+            t.rotation.x = quat.x();
+            t.rotation.y = quat.y();
+            t.rotation.z = quat.z();
+            t.rotation.w = quat.w();
 
-        // publish ground truth pose
-        geometry_msgs::PoseStamped ps;
-        ps.header.frame_id = "/map";
-        ps.pose.position.x = state.x;
-        ps.pose.position.y = state.y;
-        ps.pose.orientation.x = quat.x();
-        ps.pose.orientation.y = quat.y();
-        ps.pose.orientation.z = quat.z();
-        ps.pose.orientation.w = quat.w();
+            // publish ground truth pose
+            geometry_msgs::PoseStamped ps;
+            ps.header.frame_id = "/map";
+            ps.pose.position.x = state.x;
+            ps.pose.position.y = state.y;
+            ps.pose.orientation.x = quat.x();
+            ps.pose.orientation.y = quat.y();
+            ps.pose.orientation.z = quat.z();
+            ps.pose.orientation.w = quat.w();
 
-        // Add a header to the transformation
-        geometry_msgs::TransformStamped ts;
-        ts.transform = t;
-        ts.header.stamp = timestamp;
-        ts.header.frame_id = map_frame;
-        ts.child_frame_id = base_frame;
+            // Add a header to the transformation
+            geometry_msgs::TransformStamped ts;
+            ts.transform = t;
+            ts.header.stamp = timestamp;
+            ts.header.frame_id = map_frame;
+            ts.child_frame_id = base_frame;
 
-        // Publish them
-        if (broadcast_transform) {
-            br.sendTransform(ts);
+            // Publish them
+            if (broadcast_transform) {
+                br.sendTransform(ts);
+            }
+            if (pub_gt_pose) {
+                pose_pub.publish(ps);
+            }
         }
-        if (pub_gt_pose) {
-            pose_pub.publish(ps);
+
+        void pub_steer_ang_transform(ros::Time timestamp) {
+            // Set the steering angle to make the wheels move
+            // Publish the steering angle
+            tf2::Quaternion quat_wheel;
+            quat_wheel.setEuler(0., 0., state.steer_angle);
+            geometry_msgs::TransformStamped ts_wheel;
+            ts_wheel.transform.rotation.x = quat_wheel.x();
+            ts_wheel.transform.rotation.y = quat_wheel.y();
+            ts_wheel.transform.rotation.z = quat_wheel.z();
+            ts_wheel.transform.rotation.w = quat_wheel.w();
+            ts_wheel.header.stamp = timestamp;
+            ts_wheel.header.frame_id = "front_left_hinge";
+            ts_wheel.child_frame_id = "front_left_wheel";
+            br.sendTransform(ts_wheel);
+            ts_wheel.header.frame_id = "front_right_hinge";
+            ts_wheel.child_frame_id = "front_right_wheel";
+            br.sendTransform(ts_wheel);
         }
-    }
 
-    void pub_steer_ang_transform(ros::Time timestamp) {
-        // Set the steering angle to make the wheels move
-        // Publish the steering angle
-        tf2::Quaternion quat_wheel;
-        quat_wheel.setEuler(0., 0., state.steer_angle);
-        geometry_msgs::TransformStamped ts_wheel;
-        ts_wheel.transform.rotation.x = quat_wheel.x();
-        ts_wheel.transform.rotation.y = quat_wheel.y();
-        ts_wheel.transform.rotation.z = quat_wheel.z();
-        ts_wheel.transform.rotation.w = quat_wheel.w();
-        ts_wheel.header.stamp = timestamp;
-        ts_wheel.header.frame_id = "front_left_hinge";
-        ts_wheel.child_frame_id = "front_left_wheel";
-        br.sendTransform(ts_wheel);
-        ts_wheel.header.frame_id = "front_right_hinge";
-        ts_wheel.child_frame_id = "front_right_wheel";
-        br.sendTransform(ts_wheel);
-    }
+        void pub_laser_link_transform(ros::Time timestamp) {
+            // Publish a transformation between base link and laser
+            geometry_msgs::TransformStamped scan_ts;
+            scan_ts.transform.translation.x = scan_distance_to_base_link;
+            scan_ts.transform.rotation.w = 1;
+            scan_ts.header.stamp = timestamp;
+            scan_ts.header.frame_id = base_frame;
+            scan_ts.child_frame_id = scan_frame;
+            br.sendTransform(scan_ts);
+        }
 
-    void pub_laser_link_transform(ros::Time timestamp) {
-        // Publish a transformation between base link and laser
-        geometry_msgs::TransformStamped scan_ts;
-        scan_ts.transform.translation.x = scan_distance_to_base_link;
-        scan_ts.transform.rotation.w = 1;
-        scan_ts.header.stamp = timestamp;
-        scan_ts.header.frame_id = base_frame;
-        scan_ts.child_frame_id = scan_frame;
-        br.sendTransform(scan_ts);
-    }
+        void pub_odom(ros::Time timestamp) {
+            // Make an odom message and publish it
+            nav_msgs::Odometry odom;
+            odom.header.stamp = timestamp;
+            odom.header.frame_id = map_frame;
+            odom.child_frame_id = base_frame;
+            odom.pose.pose.position.x = state.x;
+            odom.pose.pose.position.y = state.y;
+            tf2::Quaternion quat;
+            quat.setEuler(0., 0., state.theta);
+            odom.pose.pose.orientation.x = quat.x();
+            odom.pose.pose.orientation.y = quat.y();
+            odom.pose.pose.orientation.z = quat.z();
+            odom.pose.pose.orientation.w = quat.w();
+            odom.twist.twist.linear.x = state.velocity;
+            odom.twist.twist.angular.z = state.angular_velocity;
+            odom_pub.publish(odom);
+        }
 
-    void pub_odom(ros::Time timestamp) {
-        // Make an odom message and publish it
-        nav_msgs::Odometry odom;
-        odom.header.stamp = timestamp;
-        odom.header.frame_id = map_frame;
-        odom.child_frame_id = base_frame;
-        odom.pose.pose.position.x = state.x;
-        odom.pose.pose.position.y = state.y;
-        tf2::Quaternion quat;
-        quat.setEuler(0., 0., state.theta);
-        odom.pose.pose.orientation.x = quat.x();
-        odom.pose.pose.orientation.y = quat.y();
-        odom.pose.pose.orientation.z = quat.z();
-        odom.pose.pose.orientation.w = quat.w();
-        odom.twist.twist.linear.x = state.velocity;
-        odom.twist.twist.angular.z = state.angular_velocity;
-
-        odom_pub.publish(odom);
-    }
-
-    void pub_state(ros::Time timestamp) {
-
-        racecar_simulator::carstate carstate_msg;
-
-        // carstate
-        carstate_msg.x                = state.x;
-        carstate_msg.y                = state.y;
-        carstate_msg.theta            = state.theta;
-        carstate_msg.velocity         = state.velocity;
-        carstate_msg.steer_angle      = state.steer_angle;
-        carstate_msg.angular_velocity = state.angular_velocity;
-        carstate_msg.slip_angle       = state.slip_angle;
-        carstate_msg.st_dyn           = state.st_dyn;
-
-        // sim variables
-        carstate_msg.previous_seconds           = previous_seconds;
-        carstate_msg.scan_distance_to_base_link = scan_distance_to_base_link;
-        carstate_msg.max_speed                  = max_speed;
-        carstate_msg.max_steering_angle         = max_steering_angle;
-        carstate_msg.max_accel                  = max_accel;
-        carstate_msg.max_steering_vel           = max_steering_vel;
-        carstate_msg.max_decel                  = max_decel;
-        carstate_msg.desired_speed              = desired_speed;
-        carstate_msg.desired_steer_ang          = desired_steer_ang;
-        carstate_msg.accel                      = accel;
-        carstate_msg.steer_angle_vel            = steer_angle_vel;
-        carstate_msg.width                      = width;
-
-        // carparam
-        carstate_msg.wheelbase      = params.wheelbase;
-        carstate_msg.friction_coeff = params.friction_coeff;
-        carstate_msg.h_cg           = params.h_cg;
-        carstate_msg.l_f            = params.l_f;
-        carstate_msg.l_r            = params.l_r;
-        carstate_msg.cs_f           = params.cs_f;
-        carstate_msg.cs_r           = params.cs_r;
-        carstate_msg.mass           = params.mass;
-        carstate_msg.I_z            = params.I_z;
-
-        // send collision status as well
-        carstate_msg.collision      = TTC;
-
-        state_pub.publish(carstate_msg);
-    }
-
-    void pub_imu(ros::Time timestamp) {
-        // Make an IMU message and publish it
-        // TODO: make imu message
-        sensor_msgs::Imu imu;
-        imu.header.stamp = timestamp;
-        imu.header.frame_id = map_frame;
+        void pub_imu(ros::Time timestamp) {
+            // Make an IMU message and publish it
+            // TODO: make imu message
+            sensor_msgs::Imu imu;
+            imu.header.stamp = timestamp;
+            imu.header.frame_id = map_frame;
 
 
-        imu_pub.publish(imu);
-    }
+            imu_pub.publish(imu);
+        }
 
 };
 
