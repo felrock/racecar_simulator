@@ -33,6 +33,14 @@
 #include <vector>
 
 
+/*
+ * TODO: Apply smart pointers?
+ *        Node evaluation method
+ *        Implement MCTS instead of BFS
+ *
+ */
+
+
 using namespace racecar_simulator;
 
 typedef std::pair<double, double> ActionPair;
@@ -47,21 +55,27 @@ class ActionTree {
 
     // multi directional
     ActionTree *parent;
-    std::vector<ActionTree*> *children;
+    std::vector<ActionTree*> children;
 
-    ActionTree(ActionTree *parent,
-               CarState state,
-               ActionPair actions)
+    ActionTree(ActionTree *p, CarState s, ActionPair ap)
     {
         score = 0;
-        this->state = state;
-        this->parent = parent;
-        this->actions = actions;
+        this->state = s;
+        this->parent = p;
+        this->actions = ap;
+        this->children = std::vector<ActionTree*>();
     }
 
-    void setChildren(std::vector<ActionTree*> *children)
+    ~ActionTree()
     {
-        this->children = children;
+        for(auto child: children)
+            delete child;
+    }
+
+    void setChildren(std::vector<ActionTree*> children)
+    {
+        for(auto child: children)
+            this->children.push_back(child);
     }
 };
 
@@ -357,10 +371,15 @@ public:
         //set_steer_angle_vel(compute_steer_vel(actual_ang));
         set_steer_angle_vel(compute_steer_vel(desired_steer_ang));
 
+        // random test
+        ros::Time t1 = ros::Time::now();
+        tree_ex();
+        ros::Time t2 = ros::Time::now();
+        std::cout << "time in sec: " << t2.toSec()-t1.toSec() << std::endl;
+
         // Update the pose
         ros::Time timestamp = ros::Time::now();
         double current_seconds = timestamp.toSec();
-        std::cout << accel << " " << steer_angle_vel << std::endl;
         state = STKinematics::update(
             state,
             accel,
@@ -754,9 +773,9 @@ public:
 
 /// ---------------------- TREE EXPANSION  ----------------------
 
-    std::vector<ActionTree*> *createActionTreeChildren(CarState state, ActionTree *root)
+    std::vector<ActionTree*> create_at_children(ActionTree *node)
     {
-        std::vector<ActionTree*> *vec = new std::vector<ActionTree*>();
+        std::vector<ActionTree*> vec = std::vector<ActionTree*>();
         std::array<double, 3> speed_inc = {0.05, 0.0, -0.05};
         std::array<double, 5> turn_inc  = {0.1, 0.05, 0.0, -0.05, -0.1};
 
@@ -764,49 +783,56 @@ public:
         {
             for(double ti: turn_inc)
             {
-                double temp_acc = root->actions.first + si;
-                double temp_ang = root->actions.second + ti;
+                double temp_acc = node->actions.first + si;
+                double temp_ang = node->actions.second + ti;
 
                 CarState temp_state = STKinematics::update(
-                                                state,
+                                                node->state,
                                                 temp_acc,
                                                 temp_ang,
                                                 params,
                                                 update_pose_rate);
                 // eval score here
 
-                ActionTree *child_node = new ActionTree(root,
+                ActionTree *child_node = new ActionTree(node,
                                             temp_state,
                                             ActionPair(temp_acc, temp_ang));
-                vec->push_back(child_node);
+                vec.push_back(child_node);
             }
         }
         return vec;
     }
 
-    void tree_ex(const ros::TimerEvent&)
+    void tree_ex()
     {
 
         // init tree structure
-        std::vector<ActionTree*> *children = createActionTreeChildren(state, NULL);
         ActionTree *root = new ActionTree(NULL, state, ActionPair(0.0,0.0));
+        std::vector<ActionTree*> children = create_at_children(root);
         root->setChildren(children);
 
-
         // queue for leafs
-        std::vector<ActionTree*> *queue = new std::vector<ActionTree*>();
-        queue->push_back(root);
+        std::vector<ActionTree*> queue = std::vector<ActionTree*>();
 
-        while(queue->size() > 0 /*&& t_start + exec_time < t_end*/)
+        for(auto child : children)
+            queue.push_back(child);
+
+        // add time limit to this loop
+        while(queue.size() > 0 and queue.size() < 1e3)
         {
-            ActionTree *current_action = queue->back();
-            queue->pop_back();
+            ActionTree *current_node = queue.back();
+            queue.pop_back();
+            std::vector<ActionTree*> new_children = create_at_children(current_node);
+            current_node->setChildren(new_children);
+
             // run it through one iteration
             // check if terminal state
             // propagate score up the tree
+
+            for(auto child : new_children)
+                queue.push_back(child);
         }
-
-
+        delete root;
 
         // choose the best option
         /*
