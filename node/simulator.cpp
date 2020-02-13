@@ -37,21 +37,23 @@
  * TODO: Apply smart pointers?
  *        Node evaluation method
  *        Implement MCTS instead of BFS
- *
  */
 
 
 using namespace racecar_simulator;
 
+// speed, angle
 typedef std::pair<double, double> ActionPair;
 
 class ActionTree {
 
     public:
 
+    // tree state
     CarState state;
     ActionPair actions;
     double score;
+    int visits;
 
     // multi directional
     ActionTree *parent;
@@ -60,6 +62,7 @@ class ActionTree {
     ActionTree(ActionTree *p, CarState s, ActionPair ap)
     {
         score = 0;
+        visits = 0;
         this->state = s;
         this->parent = p;
         this->actions = ap;
@@ -76,6 +79,39 @@ class ActionTree {
     {
         for(auto child: children)
             this->children.push_back(child);
+    }
+
+    void propagateToRoot(double score)
+    {
+        if(parent != NULL)
+        {
+            this.score = score;
+            visits += 1;
+            parent->propagateToRoot(score);
+        }
+    }
+
+    ActionTree* explore()
+    {
+        // check if leaf
+        if(children.size() == 0)
+        {
+            return this;
+        }
+        else
+        {
+            ActionTree* next_step = children[0];
+            double      cur_score = children[0]->score;
+            for(auto child : children)
+            {
+                if(child.score > cur_score)
+                {
+                    cur_score = child->score;
+                    next_step = child;
+                }
+            }
+            next_step->explore();
+        }
     }
 };
 
@@ -793,6 +829,7 @@ public:
                                                 params,
                                                 update_pose_rate);
                 // eval score here
+                // crash
 
                 ActionTree *child_node = new ActionTree(node,
                                             temp_state,
@@ -811,26 +848,28 @@ public:
         std::vector<ActionTree*> children = create_at_children(root);
         root->setChildren(children);
 
-        // queue for leafs
-        std::vector<ActionTree*> queue = std::vector<ActionTree*>();
-
-        for(auto child : children)
-            queue.push_back(child);
 
         // add time limit to this loop
-        while(queue.size() > 0 and queue.size() < 1e3)
+        double t_start = ros::Time::now().toSec();
+        double t_cur   = t_start;
+
+        // time to expand
+        double TREE_SEARCH_TIME = 0.01;
+
+        while(t_cur < t_start + TREE_SEARCH_TIME)
         {
-            ActionTree *current_node = queue.back();
-            queue.pop_back();
-            std::vector<ActionTree*> new_children = create_at_children(current_node);
-            current_node->setChildren(new_children);
+            ActionTree *current_node = root->explore();
+
+            // create new children to our current node
+            current_node->setChildren(create_at_children(current_node));
+
+            ros::Time timestamp = ros::Time::now();
+            double current_seconds = timestamp.toSec();
+
 
             // run it through one iteration
             // check if terminal state
             // propagate score up the tree
-
-            for(auto child : new_children)
-                queue.push_back(child);
         }
         delete root;
 
