@@ -29,23 +29,53 @@
 
 #include <iostream>
 #include <math.h>
+#include <array>
+#include <vector>
+
+
+/*
+ * TODO: Apply smart pointers?
+ *        Node evaluation method
+ *        Implement MCTS instead of BFS
+ *
+ */
 
 
 using namespace racecar_simulator;
 
+typedef std::pair<double, double> ActionPair;
+
 class ActionTree {
-    // Lol
+
     public:
-    double speed, angle;
+
+    CarState state;
+    ActionPair actions;
     double score;
 
-    ActionTree parent;
-    std::vector<ActionTree> children;
-    ActionTree(double speed, double angle, std::vector<ActionTree> children)
+    // multi directional
+    ActionTree *parent;
+    std::vector<ActionTree*> children;
+
+    ActionTree(ActionTree *p, CarState s, ActionPair ap)
     {
-        this.speed = speed;
-        this.angle = angle;
-        this.children = children;
+        score = 0;
+        this->state = s;
+        this->parent = p;
+        this->actions = ap;
+        this->children = std::vector<ActionTree*>();
+    }
+
+    ~ActionTree()
+    {
+        for(auto child: children)
+            delete child;
+    }
+
+    void setChildren(std::vector<ActionTree*> children)
+    {
+        for(auto child: children)
+            this->children.push_back(child);
     }
 };
 
@@ -322,74 +352,11 @@ public:
         ROS_INFO("Simulator constructed.");
     } /* End of constructor */
 
-    void tree_ex(const ros::TimerEvent&)
-    {
-        // this function might be called by particle filter positioning thingy?
-
-        // add child actions
-        ActionTree leftAction = new ActionTree(state.speed,
-                                               state.angle-ang_inc,
-                                               std::vector<ActionTree>());
-
-        ActionTree noAction = new ActionTree(state.speed,
-                                               state.angle,
-                                               std::vector<ActionTree>());
-
-        ActionTree rightAction = new ActionTree(state.speed,
-                                                state.angle+ang_inc,
-                                                std::vector<ActionTree>());
-
-        std::vector<ActionTree> children = new std::vector<ActionTree>();
-        children.push_back(rightAction);
-        children.push_back(noAction);
-        children.push_back(leftAction);
-
-        ActionTree root = new ActionTree(state.speed, state.angle, &children);
-
-        std::vector<ActionTree> queue = new std::vector<ActionTree>();
-        queue.push_back(root);
-
-        while(queue.size() > 0 && t_start + exec_time < t_end)
-        {
-            ActionTree current_action = queue.pop();
-            // run it through one iteration
-            // check if terminal state
-            // propagate score up the tree
-        }
-
-
-
-        // choose the best option
-        double leftActionScore = root.children[0].score;
-        double noActionScore = root.children[1].score;
-        double rightActionScore = root.children[2].score;
-
-        if(leftActionScore > rightActionScore)
-        {
-            if(leftActionScore > noActionScore)
-            {
-                // left
-            }
-            else
-            {
-                // no action
-            }
-        }
-        else if(rightActionScore > noActionScore)
-        {
-            // right
-        }
-        else
-        {
-            // no action
-        }
-    }
-
-
     void update_pose(const ros::TimerEvent&) {
 
         // simulate P controller
         compute_accel(desired_speed);
+        /*
         double actual_ang = 0.0;
         if (steering_buffer.size() < buffer_length) {
             steering_buffer.push_back(desired_steer_ang);
@@ -398,8 +365,17 @@ public:
             steering_buffer.insert(steering_buffer.begin(), desired_steer_ang);
             actual_ang = steering_buffer.back();
             steering_buffer.pop_back();
-        }
-        set_steer_angle_vel(compute_steer_vel(actual_ang));
+        }*/
+
+
+        //set_steer_angle_vel(compute_steer_vel(actual_ang));
+        set_steer_angle_vel(compute_steer_vel(desired_steer_ang));
+
+        // random test
+        ros::Time t1 = ros::Time::now();
+        tree_ex();
+        ros::Time t2 = ros::Time::now();
+        std::cout << "time in sec: " << t2.toSec()-t1.toSec() << std::endl;
 
         // Update the pose
         ros::Time timestamp = ros::Time::now();
@@ -411,10 +387,10 @@ public:
             params,
             update_pose_rate);
 
-        // limit values to max and min set in params
-        state.velocity = std::min(std::max(state.velocity, -max_speed), max_speed);
-        state.steer_angle = std::min(std::max(state.steer_angle, -max_steering_angle), max_steering_angle);
+        // limit according to params
+        limitSpeedSteer(&state);
 
+        // limit values to max and min set in params
         previous_seconds = current_seconds;
 
         // Publish the pose as a transformation
@@ -498,6 +474,12 @@ public:
 
 
 /// ---------------------- GENERAL HELPER FUNCTIONS ----------------------
+
+    void limitSpeedSteer(CarState *carstate)
+    {
+        carstate->velocity = std::min(std::max(carstate->velocity, -max_speed), max_speed);
+        carstate->steer_angle = std::min(std::max(carstate->steer_angle, -max_steering_angle), max_steering_angle);
+    }
 
     std::vector<int> ind_2_rc(int ind) {
         std::vector<int> rc;
@@ -608,7 +590,7 @@ public:
         }
     }
 
-    /// ---------------------- CALLBACK FUNCTIONS ----------------------
+/// ---------------------- CALLBACK FUNCTIONS ----------------------
 
     void obs_callback(const geometry_msgs::PointStamped &msg) {
         double x = msg.point.x;
@@ -655,6 +637,7 @@ public:
     }
 
     void map_callback(const nav_msgs::OccupancyGrid & msg) {
+
         // Fetch the map parameters
         size_t height = msg.info.height;
         size_t width = msg.info.width;
@@ -688,7 +671,7 @@ public:
         map_exists = true;
     }
 
-        /// ---------------------- PUBLISHING HELPER FUNCTIONS ----------------------
+/// ---------------------- PUBLISHING HELPER FUNCTIONS ----------------------
 
         void pub_pose_transform(ros::Time timestamp) {
             // Convert the pose into a transformation
@@ -787,6 +770,99 @@ public:
 
             imu_pub.publish(imu);
         }
+
+/// ---------------------- TREE EXPANSION  ----------------------
+
+    std::vector<ActionTree*> create_at_children(ActionTree *node)
+    {
+        std::vector<ActionTree*> vec = std::vector<ActionTree*>();
+        std::array<double, 3> speed_inc = {0.05, 0.0, -0.05};
+        std::array<double, 5> turn_inc  = {0.1, 0.05, 0.0, -0.05, -0.1};
+
+        for(double si: speed_inc)
+        {
+            for(double ti: turn_inc)
+            {
+                double temp_acc = node->actions.first + si;
+                double temp_ang = node->actions.second + ti;
+
+                CarState temp_state = STKinematics::update(
+                                                node->state,
+                                                temp_acc,
+                                                temp_ang,
+                                                params,
+                                                update_pose_rate);
+                // eval score here
+
+                ActionTree *child_node = new ActionTree(node,
+                                            temp_state,
+                                            ActionPair(temp_acc, temp_ang));
+                vec.push_back(child_node);
+            }
+        }
+        return vec;
+    }
+
+    void tree_ex()
+    {
+
+        // init tree structure
+        ActionTree *root = new ActionTree(NULL, state, ActionPair(0.0,0.0));
+        std::vector<ActionTree*> children = create_at_children(root);
+        root->setChildren(children);
+
+        // queue for leafs
+        std::vector<ActionTree*> queue = std::vector<ActionTree*>();
+
+        for(auto child : children)
+            queue.push_back(child);
+
+        // add time limit to this loop
+        while(queue.size() > 0 and queue.size() < 1e3)
+        {
+            ActionTree *current_node = queue.back();
+            queue.pop_back();
+            std::vector<ActionTree*> new_children = create_at_children(current_node);
+            current_node->setChildren(new_children);
+
+            // run it through one iteration
+            // check if terminal state
+            // propagate score up the tree
+
+            for(auto child : new_children)
+                queue.push_back(child);
+        }
+        delete root;
+
+        // choose the best option
+        /*
+        double leftActionScore = root.children[0]->score;
+        double noActionScore = root.children[1]->score;
+        double rightActionScore = root.children[2]->score;
+
+        if(leftActionScore > rightActionScore)
+        {
+            if(leftActionScore > noActionScore)
+            {
+                // left
+            }
+            else
+            {
+                // no action
+            }
+        }
+        else if(rightActionScore > noActionScore)
+        {
+            // right
+        }
+        else
+        {
+            // no action
+        }
+        */
+    }
+
+
 
 };
 
