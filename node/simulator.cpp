@@ -85,7 +85,7 @@ class ActionTree {
     {
         if(parent != NULL)
         {
-            this.score = score;
+            this->score = score;
             visits += 1;
             parent->propagateToRoot(score);
         }
@@ -102,12 +102,13 @@ class ActionTree {
         {
             ActionTree* next_step = children[0];
             double      cur_score = children[0]->score;
-            for(auto child : children)
+            for(size_t i=1; i < children.size(); ++i)
             {
-                if(child.score > cur_score)
+                if(children[i]->score > cur_score)
                 {
-                    cur_score = child->score;
-                    next_step = child;
+                    cur_score = children[i]->score;
+                    next_step = children[i];
+                    break;
                 }
             }
             next_step->explore();
@@ -196,6 +197,10 @@ class RacecarSimulator {
 
     // pi
     const double PI = 3.1415;
+
+    // accel param
+
+    double kp;
 
     // precompute distance from lidar to edge of car for each beam
     std::vector<double> car_distances;
@@ -332,6 +337,9 @@ public:
         // steering delay buffer
         steering_buffer = std::vector<double>(buffer_length);
 
+        // accel param
+        kp = 2.0 * max_accel / max_speed;
+
         // OBSTACLE BUTTON:
         // wait for one map message to get the map data array
         boost::shared_ptr<nav_msgs::OccupancyGrid const> map_ptr;
@@ -388,136 +396,57 @@ public:
         ROS_INFO("Simulator constructed.");
     } /* End of constructor */
 
-    void update_pose(const ros::TimerEvent&) {
-
-        // simulate P controller
-        compute_accel(desired_speed);
-        /*
-        double actual_ang = 0.0;
-        if (steering_buffer.size() < buffer_length) {
-            steering_buffer.push_back(desired_steer_ang);
-            actual_ang = 0.0;
-        } else {
-            steering_buffer.insert(steering_buffer.begin(), desired_steer_ang);
-            actual_ang = steering_buffer.back();
-            steering_buffer.pop_back();
-        }*/
-
-
-        //set_steer_angle_vel(compute_steer_vel(actual_ang));
-        set_steer_angle_vel(compute_steer_vel(desired_steer_ang));
-
-        // random test
-        ros::Time t1 = ros::Time::now();
-        tree_ex();
-        ros::Time t2 = ros::Time::now();
-        std::cout << "time in sec: " << t2.toSec()-t1.toSec() << std::endl;
-
-        // Update the pose
-        ros::Time timestamp = ros::Time::now();
-        double current_seconds = timestamp.toSec();
-        state = STKinematics::update(
-            state,
-            accel,
-            steer_angle_vel,
-            params,
-            update_pose_rate);
-
-        // limit according to params
-        limitSpeedSteer(&state);
-
-        // limit values to max and min set in params
-        previous_seconds = current_seconds;
-
-        // Publish the pose as a transformation
-        pub_pose_transform(timestamp);
-
-        // Publish the steering angle as a transformation so the wheels move
-        pub_steer_ang_transform(timestamp);
-
-        // Make an odom message as well and publish it
-        pub_odom(timestamp);
-
-        // TODO: make and publish IMU message
-        pub_imu(timestamp);
-
-        /// KEEP in sim
-        // If we have a map, perform a scan
-        if (map_exists) {
-            // Get the pose of the lidar, given the pose of base link
-            // (base link is the center of the rear axle)
-            Pose2D scan_pose;
-            scan_pose.x = state.x + scan_distance_to_base_link * std::cos(state.theta);
-            scan_pose.y = state.y + scan_distance_to_base_link * std::sin(state.theta);
-            scan_pose.theta = state.theta;
-
-            // Compute the scan from the lidar
-            std::vector<double> scan = scan_simulator.scan(scan_pose);
-
-            // Convert to float
-            std::vector<float> scan_(scan.size());
-            for (size_t i = 0; i < scan.size(); i++)
-                scan_[i] = scan[i];
-
-            // TTC Calculations are done here so the car can be halted in the simulator:
-            // to reset TTC
-            bool no_collision = true;
-            if (state.velocity != 0) {
-                for (size_t i = 0; i < scan_.size(); i++) {
-                    // TTC calculations
-
-                    // calculate projected velocity
-                    double proj_velocity = state.velocity * cosines[i];
-                    double ttc = (scan_[i] - car_distances[i]) / proj_velocity;
-                    // if it's small enough to count as a collision
-                    if ((ttc < ttc_threshold) && (ttc >= 0.0)) {
-                        if (!TTC) {
-                            first_ttc_actions();
-                        }
-
-                        no_collision = false;
-                        TTC = true;
-
-                        ROS_INFO("Collision detected");
-                    }
-                }
-            }
-
-            // reset TTC
-            if (no_collision)
-                TTC = false;
-
-            // Publish the laser message
-            sensor_msgs::LaserScan scan_msg;
-            scan_msg.header.stamp = timestamp;
-            scan_msg.header.frame_id = scan_frame;
-            scan_msg.angle_min = -scan_simulator.get_field_of_view()/2.;
-            scan_msg.angle_max =  scan_simulator.get_field_of_view()/2.;
-            scan_msg.angle_increment = scan_simulator.get_angle_increment();
-            scan_msg.range_max = 100;
-            scan_msg.ranges = scan_;
-            scan_msg.intensities = scan_;
-
-            scan_pub.publish(scan_msg);
-
-
-            // Publish a transformation between base link and laser
-            pub_laser_link_transform(timestamp);
-
-        }
-
-    } // end of update_pose
 
 
 /// ---------------------- GENERAL HELPER FUNCTIONS ----------------------
 
-    void limitSpeedSteer(CarState *carstate)
+
+    bool isCrashed(CarState carstate)
+    {
+        Pose2D scan_pose;
+        scan_pose.x = carstate.x + scan_distance_to_base_link * std::cos(carstate.theta);
+        scan_pose.y = carstate.y + scan_distance_to_base_link * std::sin(carstate.theta);
+        scan_pose.theta = carstate.theta;
+
+        // Compute the scan from the lidar
+        std::vector<double> scan = scan_simulator.scan(scan_pose);
+
+        // TTC Calculations are done here so the car can be halted in the simulator:
+
+        // if the car isnt moving it wont crash
+        if (carstate.velocity != 0)
+        {
+
+            for (size_t i = 0; i < scan.size(); ++i)
+            {
+                // TTC calculations
+
+                // calculate projected velocity
+                double proj_velocity = carstate.velocity * cosines[i];
+                double ttc = (scan[i] - car_distances[i]) / proj_velocity;
+
+                // if it's small enough to count as a collision
+                if ((ttc < ttc_threshold) && (ttc >= 0.0))
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    void limitVelocity(CarState *carstate)
     {
         carstate->velocity = std::min(std::max(carstate->velocity, -max_speed), max_speed);
+    }
+
+    void limitSteerAngle(CarState *carstate)
+    {
         carstate->steer_angle = std::min(std::max(carstate->steer_angle, -max_steering_angle), max_steering_angle);
     }
 
-    std::vector<int> ind_2_rc(int ind) {
+    std::vector<int> ind_2_rc(int ind)
+    {
         std::vector<int> rc;
         int row = floor(ind/map_width);
         int col = ind%map_width - 1;
@@ -526,19 +455,22 @@ public:
         return rc;
     }
 
-    int rc_2_ind(int r, int c) {
+    int rc_2_ind(int r, int c)
+    {
         return r*map_width + c;
 
     }
 
-    std::vector<int> coord_2_cell_rc(double x, double y) {
+    std::vector<int> coord_2_cell_rc(double x, double y)
+    {
         std::vector<int> rc;
         rc.push_back(static_cast<int>((y-origin_y)/map_resolution));
         rc.push_back(static_cast<int>((x-origin_x)/map_resolution));
         return rc;
     }
 
-    void first_ttc_actions() {
+    void first_ttc_actions()
+    {
         // completely stop vehicle
         state.velocity = 0.0;
         state.angular_velocity = 0.0;
@@ -548,14 +480,6 @@ public:
         accel = 0.0;
         desired_speed = 0.0;
         desired_steer_ang = 0.0;
-    }
-
-    void set_accel(double accel_) {
-        accel = std::min(std::max(accel_, -max_accel), max_accel);
-    }
-
-    void set_steer_angle_vel(double steer_angle_vel_) {
-        steer_angle_vel = std::min(std::max(steer_angle_vel_, -max_steering_vel), max_steering_vel);
     }
 
     void add_obs(int ind) {
@@ -585,9 +509,10 @@ public:
         map_pub.publish(current_map);
     }
 
-    double compute_steer_vel(double desired_angle) {
+    double compute_steer_vel(double desired_angle, double current_angle) {
+
         // get difference between current and desired
-        double dif = (desired_angle - state.steer_angle);
+        double dif = (desired_angle - current_angle);
 
         // calculate velocity
         double steer_vel;
@@ -597,31 +522,31 @@ public:
             steer_vel = 0;
         }
 
-        return steer_vel;
+        return std::min(std::max(steer_vel, -max_steering_vel), max_steering_vel);
+
     }
 
-    void compute_accel(double desired_velocity) {
+    double compute_accel(double desired_velocity, double current_velocity) {
+
         // get difference between current and desired
-        double dif = (desired_velocity - state.velocity);
+        double dif = desired_velocity - current_velocity;
 
         if (state.velocity > 0) {
             if (dif > 0) {
                 // accelerate
-                double kp = 2.0 * max_accel / max_speed;
-                set_accel(kp * dif);
+                return std::min(std::max(kp*dif, -max_accel), max_accel);
             } else {
                 // brake
-                accel = -max_decel;
+                return -max_decel;
             }
         } else {
             if (dif > 0) {
                 // brake
-                accel = max_decel;
+                return max_decel;
 
             } else {
                 // accelerate
-                double kp = 2.0 * max_accel / max_speed;
-                set_accel(kp * dif);
+                return std::min(std::max(kp*dif, -max_accel), max_accel);
             }
         }
     }
@@ -855,6 +780,7 @@ public:
 
         // time to expand
         double TREE_SEARCH_TIME = 0.01;
+        int simulation_count = 0;
 
         while(t_cur < t_start + TREE_SEARCH_TIME)
         {
@@ -864,43 +790,130 @@ public:
             current_node->setChildren(create_at_children(current_node));
 
             ros::Time timestamp = ros::Time::now();
-            double current_seconds = timestamp.toSec();
+            t_cur = timestamp.toSec();
+            simulation_count++;
 
 
             // run it through one iteration
             // check if terminal state
             // propagate score up the tree
         }
+        std::cout << "sim count " << simulation_count << " in " << TREE_SEARCH_TIME << std::endl;
+        // clean up
         delete root;
-
-        // choose the best option
-        /*
-        double leftActionScore = root.children[0]->score;
-        double noActionScore = root.children[1]->score;
-        double rightActionScore = root.children[2]->score;
-
-        if(leftActionScore > rightActionScore)
-        {
-            if(leftActionScore > noActionScore)
-            {
-                // left
-            }
-            else
-            {
-                // no action
-            }
-        }
-        else if(rightActionScore > noActionScore)
-        {
-            // right
-        }
-        else
-        {
-            // no action
-        }
-        */
     }
 
+// ---------------------- simulation update, pub data  ----------------------
+
+    void update_pose(const ros::TimerEvent&) {
+
+        // simulate P controller
+        accel = compute_accel(desired_speed, state.velocity);
+        steer_angle_vel = compute_steer_vel(desired_steer_ang, state.steer_angle);
+
+        // random test
+        /*
+        ros::Time t1 = ros::Time::now();
+        tree_ex();
+        ros::Time t2 = ros::Time::now();
+        std::cout << "tree_ex(): " << t2.toSec()-t1.toSec() << "s"<< std::endl;
+        */
+
+        // Update the pose
+        ros::Time timestamp = ros::Time::now();
+        double current_seconds = timestamp.toSec();
+        state = STKinematics::update(
+            state,
+            accel,
+            steer_angle_vel,
+            params,
+            update_pose_rate);
+
+        // limit according to params
+        limitVelocity(&state);
+        limitSteerAngle(&state);
+
+        // limit values to max and min set in params
+        previous_seconds = current_seconds;
+
+        // Publish the pose as a transformation
+        pub_pose_transform(timestamp);
+
+        // Publish the steering angle as a transformation so the wheels move
+        pub_steer_ang_transform(timestamp);
+
+        // Make an odom message as well and publish it
+        pub_odom(timestamp);
+
+        // TODO: make and publish IMU message
+        pub_imu(timestamp);
+
+        /// KEEP in sim
+        // If we have a map, perform a scan
+        if (map_exists) {
+            // Get the pose of the lidar, given the pose of base link
+            // (base link is the center of the rear axle)
+            Pose2D scan_pose;
+            scan_pose.x = state.x + scan_distance_to_base_link * std::cos(state.theta);
+            scan_pose.y = state.y + scan_distance_to_base_link * std::sin(state.theta);
+            scan_pose.theta = state.theta;
+
+            // Compute the scan from the lidar
+            std::vector<double> scan = scan_simulator.scan(scan_pose);
+
+            // Convert to float
+            std::vector<float> scan_(scan.size());
+            for (size_t i = 0; i < scan.size(); i++)
+                scan_[i] = scan[i];
+
+            // TTC Calculations are done here so the car can be halted in the simulator:
+            // to reset TTC
+            bool no_collision = true;
+            if (state.velocity != 0) {
+                for (size_t i = 0; i < scan_.size(); i++) {
+                    // TTC calculations
+
+                    // calculate projected velocity
+                    double proj_velocity = state.velocity * cosines[i];
+                    double ttc = (scan_[i] - car_distances[i]) / proj_velocity;
+                    // if it's small enough to count as a collision
+                    if ((ttc < ttc_threshold) && (ttc >= 0.0)) {
+                        if (!TTC) {
+                            first_ttc_actions();
+                        }
+
+                        no_collision = false;
+                        TTC = true;
+
+                        ROS_INFO("Collision detected");
+                    }
+                }
+            }
+
+            // reset TTC
+            if (no_collision)
+                TTC = false;
+
+            // Publish the laser message
+            sensor_msgs::LaserScan scan_msg;
+            scan_msg.header.stamp = timestamp;
+            scan_msg.header.frame_id = scan_frame;
+            scan_msg.angle_min = -scan_simulator.get_field_of_view()/2.;
+            scan_msg.angle_max =  scan_simulator.get_field_of_view()/2.;
+            scan_msg.angle_increment = scan_simulator.get_angle_increment();
+            scan_msg.range_max = 100;
+            scan_msg.ranges = scan_;
+            scan_msg.intensities = scan_;
+
+            scan_pub.publish(scan_msg);
+
+
+            // Publish a transformation between base link and laser
+            pub_laser_link_transform(timestamp);
+
+        }
+
+    } // end of update_pose
 
 
 };

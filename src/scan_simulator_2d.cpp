@@ -5,11 +5,11 @@
 using namespace racecar_simulator;
 
 ScanSimulator2D::ScanSimulator2D(
-    int num_beams_, 
-    double field_of_view_, 
-    double scan_std_dev_, 
+    int num_beams_,
+    double field_of_view_,
+    double scan_std_dev_,
     double ray_tracing_epsilon_,
-    int theta_discretization) 
+    int theta_discretization)
   : num_beams(num_beams_),
     field_of_view(field_of_view_),
     scan_std_dev(scan_std_dev_),
@@ -44,7 +44,7 @@ const std::vector<double> ScanSimulator2D::scan(const Pose2D & pose) {
 
 void ScanSimulator2D::scan(const Pose2D & pose, double * scan_data) {
   // Make theta discrete by mapping the range [-pi,pi] onto [0, theta_discretization)
-  double theta_index = 
+  double theta_index =
     theta_discretization * (pose.theta - field_of_view/2.)/(2 * M_PI);
 
   // Make sure it is wrapped properly
@@ -63,7 +63,7 @@ void ScanSimulator2D::scan(const Pose2D & pose, double * scan_data) {
     // Increment the scan
     theta_index += theta_index_increment;
     // Make sure it stays in the range [0, theta_discretization)
-    while (theta_index >= theta_discretization) 
+    while (theta_index >= theta_discretization)
       theta_index -= theta_discretization;
   }
 }
@@ -83,7 +83,7 @@ double ScanSimulator2D::trace_ray(double x, double y, double theta_index) const 
     // by distance_to_nearest
     x += distance_to_nearest * c;
     y += distance_to_nearest * s;
-    
+
     // Compute the nearest distance at that point
     distance_to_nearest = distance_transform(x, y);
     total_distance += distance_to_nearest;
@@ -101,9 +101,9 @@ double ScanSimulator2D::distance_transform(double x, double y) const {
 }
 
 void ScanSimulator2D::set_map(
-    const std::vector<double> & map, 
-    size_t height_, 
-    size_t width_, 
+    const std::vector<double> & map,
+    size_t height_,
+    size_t width_,
     double resolution_,
     const Pose2D & origin_,
     double free_threshold) {
@@ -127,6 +127,7 @@ void ScanSimulator2D::set_map(
   }
   DistanceTransform::distance_2d(dt, width, height, resolution);
 }
+
 // overload for changing map on the fly
 void ScanSimulator2D::set_map(const std::vector<double> & map, double free_threshold) {
   for (size_t i = 0; i < map.size(); i++) {
