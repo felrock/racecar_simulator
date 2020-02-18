@@ -37,6 +37,8 @@
  * TODO: Apply smart pointers?
  *        Node evaluation method
  *        Implement MCTS instead of BFS
+ *
+ *        Move tree stuff into a seperate .cpp .h files
  */
 
 
@@ -54,6 +56,7 @@ class ActionTree {
     ActionPair actions;
     double score;
     int visits;
+    bool terminal;
 
     // multi directional
     ActionTree *parent;
@@ -62,17 +65,23 @@ class ActionTree {
     ActionTree(ActionTree *p, CarState s, ActionPair ap)
     {
         score = 0;
-        visits = 0;
-        this->state = s;
-        this->parent = p;
-        this->actions = ap;
-        this->children = std::vector<ActionTree*>();
+        visits = 1;
+        state = s;
+        parent = p;
+        actions = ap;
+        children = std::vector<ActionTree*>();
+        terminal = false;
     }
 
     ~ActionTree()
     {
         for(auto child: children)
             delete child;
+    }
+
+    double getScore()
+    {
+        return score/visits;
     }
 
     void setChildren(std::vector<ActionTree*> children)
@@ -85,8 +94,7 @@ class ActionTree {
     {
         if(parent != NULL)
         {
-            this->score = score;
-            visits += 1;
+            this->score += score;
             parent->propagateToRoot(score);
         }
     }
@@ -101,16 +109,18 @@ class ActionTree {
         else
         {
             ActionTree* next_step = children[0];
-            double      cur_score = children[0]->score;
+            double      cur_score = children[0]->getScore();
             for(size_t i=1; i < children.size(); ++i)
             {
-                if(children[i]->score > cur_score)
+                // select child with better score, and not terminal state
+                if(children[i]->getScore() > cur_score && !children[i]->terminal)
                 {
                     cur_score = children[i]->score;
                     next_step = children[i];
                     break;
                 }
             }
+            next_step->visits += 1;
             next_step->explore();
         }
     }
@@ -744,21 +754,38 @@ public:
         {
             for(double ti: turn_inc)
             {
-                double temp_acc = node->actions.first + si;
-                double temp_ang = node->actions.second + ti;
 
-                CarState temp_state = STKinematics::update(
-                                                node->state,
-                                                temp_acc,
-                                                temp_ang,
-                                                params,
-                                                update_pose_rate);
+                double temp_acc = compute_accel(node->actions.first + si, node->state.velocity);
+                double temp_ang = compute_steer_vel(node->actions.second + ti, node->state.steer_angle);
+                CarState temp_state = node->state;
+                for(size_t i = 0; i < 100; i++)
+                {
+                    temp_state = STKinematics::update(
+                                                    temp_state,
+                                                    temp_acc,
+                                                    temp_ang,
+                                                    params,
+                                                    update_pose_rate);
+                }
+                // limit car
+                limitVelocity(&temp_state);
+                limitSteerAngle(&temp_state);
+
                 // eval score here
                 // crash
-
                 ActionTree *child_node = new ActionTree(node,
                                             temp_state,
                                             ActionPair(temp_acc, temp_ang));
+                if(isCrashed(temp_state))
+                {
+                    child_node->terminal = true;
+                }
+                else
+                {
+                    child_node->score = 1.0;
+                    child_node->propagateToRoot(.1);
+
+                }
                 vec.push_back(child_node);
             }
         }
@@ -800,6 +827,9 @@ public:
         }
         std::cout << "sim count " << simulation_count << " in " << TREE_SEARCH_TIME << std::endl;
         // clean up
+        for(auto ch : root->children)
+            std::cout << ch->getScore() << " ";
+
         delete root;
     }
 
@@ -812,12 +842,10 @@ public:
         steer_angle_vel = compute_steer_vel(desired_steer_ang, state.steer_angle);
 
         // random test
-        /*
         ros::Time t1 = ros::Time::now();
         tree_ex();
         ros::Time t2 = ros::Time::now();
         std::cout << "tree_ex(): " << t2.toSec()-t1.toSec() << "s"<< std::endl;
-        */
 
         // Update the pose
         ros::Time timestamp = ros::Time::now();
