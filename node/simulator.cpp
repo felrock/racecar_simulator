@@ -26,6 +26,7 @@
 #include "f110_simulator/ks_kinematics.hpp"
 #include "f110_simulator/st_kinematics.hpp"
 #include "f110_simulator/precompute.hpp"
+#include "f110_simulator/treesearch.hpp"
 
 #include <iostream>
 #include <math.h>
@@ -33,101 +34,12 @@
 #include <vector>
 
 
-/*
- * TODO: Apply smart pointers?
- *        Node evaluation method
- *        Implement MCTS instead of BFS
- *
- *        Move tree stuff into a seperate .cpp .h files
- */
-
-
 using namespace racecar_simulator;
 
-// speed, angle
-typedef std::pair<double, double> ActionPair;
-
-class ActionTree {
-
-    public:
-
-    // tree state
-    CarState state;
-    ActionPair actions;
-    double score;
-    int visits;
-    bool terminal;
-
-    // multi directional
-    ActionTree *parent;
-    std::vector<ActionTree*> children;
-
-    ActionTree(ActionTree *p, CarState s, ActionPair ap)
-    {
-        score = 0;
-        visits = 1;
-        state = s;
-        parent = p;
-        actions = ap;
-        children = std::vector<ActionTree*>();
-        terminal = false;
-    }
-
-    ~ActionTree()
-    {
-        for(auto child: children)
-            delete child;
-    }
-
-    double getScore()
-    {
-        return score/visits;
-    }
-
-    void setChildren(std::vector<ActionTree*> children)
-    {
-        for(auto child: children)
-            this->children.push_back(child);
-    }
-
-    void propagateToRoot(double score)
-    {
-        if(parent != NULL)
-        {
-            this->score += score;
-            parent->propagateToRoot(score);
-        }
-    }
-
-    ActionTree* explore()
-    {
-        // check if leaf
-        if(children.size() == 0)
-        {
-            return this;
-        }
-        else
-        {
-            ActionTree* next_step = children[0];
-            double      cur_score = children[0]->getScore();
-            for(size_t i=1; i < children.size(); ++i)
-            {
-                // select child with better score, and not terminal state
-                if(children[i]->getScore() > cur_score && !children[i]->terminal)
-                {
-                    cur_score = children[i]->score;
-                    next_step = children[i];
-                    break;
-                }
-            }
-            next_step->visits += 1;
-            next_step->explore();
-        }
-    }
-};
 
 class RacecarSimulator {
     private:
+
     // A ROS node
     ros::NodeHandle n;
 
@@ -225,7 +137,6 @@ class RacecarSimulator {
 
     // moved rate here
     double update_pose_rate;
-
 
 public:
 
@@ -421,7 +332,6 @@ public:
         // Compute the scan from the lidar
         std::vector<double> scan = scan_simulator.scan(scan_pose);
 
-        // TTC Calculations are done here so the car can be halted in the simulator:
 
         // if the car isnt moving it wont crash
         if (carstate.velocity != 0)
@@ -746,6 +656,7 @@ public:
 
     std::vector<ActionTree*> create_at_children(ActionTree *node)
     {
+        double t1, t2;
         std::vector<ActionTree*> vec = std::vector<ActionTree*>();
         std::array<double, 3> speed_inc = {0.05, 0.0, -0.05};
         std::array<double, 5> turn_inc  = {0.1, 0.05, 0.0, -0.05, -0.1};
@@ -758,7 +669,8 @@ public:
                 double temp_acc = compute_accel(node->actions.first + si, node->state.velocity);
                 double temp_ang = compute_steer_vel(node->actions.second + ti, node->state.steer_angle);
                 CarState temp_state = node->state;
-                for(size_t i = 0; i < 100; i++)
+
+                for(size_t i = 0; i < 10; i++)
                 {
                     temp_state = STKinematics::update(
                                                     temp_state,
@@ -767,12 +679,15 @@ public:
                                                     params,
                                                     update_pose_rate);
                 }
+
                 // limit car
                 limitVelocity(&temp_state);
                 limitSteerAngle(&temp_state);
 
                 // eval score here
                 // crash
+
+                t1 = ros::Time::now().toSec();
                 ActionTree *child_node = new ActionTree(node,
                                             temp_state,
                                             ActionPair(temp_acc, temp_ang));
@@ -786,7 +701,9 @@ public:
                     child_node->propagateToRoot(.1);
 
                 }
+
                 vec.push_back(child_node);
+
             }
         }
         return vec;
@@ -806,15 +723,21 @@ public:
         double t_cur   = t_start;
 
         // time to expand
-        double TREE_SEARCH_TIME = 0.01;
+        double TREE_SEARCH_TIME = 1;
         int simulation_count = 0;
+
+
+        double t1, t2;
 
         while(t_cur < t_start + TREE_SEARCH_TIME)
         {
+
             ActionTree *current_node = root->explore();
+
 
             // create new children to our current node
             current_node->setChildren(create_at_children(current_node));
+
 
             ros::Time timestamp = ros::Time::now();
             t_cur = timestamp.toSec();
