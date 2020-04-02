@@ -9,8 +9,8 @@
  * TODO: Apply smart pointers?
  *        Node evaluation method
  *        Implement MCTS instead of BFS
- *
- *        Move tree stuff into a seperate .cpp .h files
+ *        Simulation steps per iteration?
+ *        Reward System?
  */
 
 
